@@ -1,0 +1,102 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=p, initial-scale=1.0">
+    <title>Document</title>
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.8/dist/js/bootstrap.bundle.min.js"
+        integrity="sha384-FKyoEForCGlyvwx9Hj09JcYn3nv7wiPVlz7YYwJrWVcXK/BmnVDxM+D2scQbITxI"
+        crossorigin="anonymous"></script>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.8/dist/css/bootstrap.min.css" rel="stylesheet"
+        integrity="sha384-sRIl4kxILFvY47J16cr9ZwB07vP4J8+LH7qKQnuqkuIAvNWLzeN8tE5YBujZqJLB" crossorigin="anonymous">
+
+</head>
+
+<body>
+    <ol></ol>
+    <p></p>
+    <p></p>
+    <div id="div1"></div>
+    <div> welcom </div>
+    <div class="demo"></div>
+    <div id="test1">new text</div>
+    <div id="test2"></div>
+    <a href=""></a>
+    <img src="" alt="">
+    <input type="text" name="" id="">
+</body>
+<script>
+    // dom document object model - web script
+    document.writeln(document)
+    elt1 = document.getElementById('test1')
+    elt1.className = 'text-primary'
+    elt1.innerHTML = "text from script!"
+    elt1.style.background = 'black'
+    elt1.style.fontSize = '30px'
+
+    document.getElementById('test2').innerHTML = 'contribution'
+
+    document.querySelector('p').innerHTML = 'web class'
+    link = document.querySelector('a');
+    link.innerHTML = 'Click me'
+    link.href = ' class2.html'
+    link.className = 'btn btn-primary m-2'
+
+    document.querySelector('.demo').innerHTML = 'class selector'
+    document.querySelector('#div1').innerHTML = 'ID selector'
+    user = { name: "mary" }
+    temp = "welcome" + user.name + "to script class"
+    temp = `welcome ${user.name}  to script class`
+
+    let text = "<div class='alert alert-warning'><b>success</b>An alert text</div>"
+    text = "<div class='alert alert-warning'><b>success</b>An alert text</div>"
+
+
+    //  text = 'new lin'
+    let elt2 = document.querySelector('#div1')
+    elt2.innerHTML = text
+
+    products =[
+        {
+            id:1,
+            name: "laptop",
+            qty:5
+        },
+    
+        {
+            id:2,
+            name: "laptop",
+            qty:0
+        },
+        {
+            id:3,
+            name: "laptop",
+            qty:15
+        }
+    ]
+    
+    items= ''
+    products.forEach(p=> {
+        items+=`<li class='${p.qty>0? "bg-primary":"bg-warning"} p-2 rounded'>
+                    ${p.name} - ${p.qty}
+                </li>`
+    });
+    document.querySelector('ol').innerHTML = items;
+    // 1
+    const notifications = [
+        {
+            id:undefined,
+            text:"",
+            date:undefined,
+            is_read: true || false
+        }
+    ]
+    // 2. create a lan ding page that displays product and
+    // their respective features and details
+    
+    
+
+</script>
+
+</html>

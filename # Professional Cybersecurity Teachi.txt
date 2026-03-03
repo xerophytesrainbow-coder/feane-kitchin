@@ -1,0 +1,732 @@
+# Professional Cybersecurity Teaching Note — Offensive (authorized) & Defensive
+Audience: advanced students learning professional, authorized offensive (red-team/emulation) and defensive (blue-team) web/frontend/backend/API security.  
+Important: All hands-on commands and labs in this note are intended for authorized, isolated lab/staging environments only (signed RoE required). This document intentionally omits any exploit payloads or step‑by‑step instructions that would enable unauthorized compromise.
+
+---
+
+## Quick rules (read aloud before every lab)
+- Written authorization (Rules of Engagement, RoE) required for any hands-on testing.
+- Use only isolated lab or staging networks (internal/host-only). Never target production or third-party systems without explicit written approval.
+- Use synthetic test accounts/data. Never exfiltrate or store real user PII.
+- Keep an audit trail. Encrypt and purge artifacts per policy.
+- Instructor/Team Lead maintains kill-switch and rollback snapshot for every session.
+
+---
+
+## Table of contents
+- Lab architecture & safe virtualization (commands)
+- Baseline defensive and discovery commands (with purpose)
+- Safe offensive/emulation commands and practices
+- Detection & monitoring (IDS, SIEM) — commands and rules
+- Secure SDLC / CI examples (commands)
+- Lab exercises (authorized, non-destructive) with commands
+- Reporting & remediation guidance (templates & commands)
+- Rules of Engagement (RoE) template (text)
+- Resources & next steps
+
+---
+
+## Lab architecture & safe virtualization (commands)
+Goal: reproducible, isolated lab where offensive behaviors are emulated and defensive controls observed.
+
+VirtualBox CLI examples (use only on lab host)
+- Import VM (OVA/OVF):
+  - VBoxManage import Metasploitable2.ova
+- Set VM network to Internal Network "lab-net":
+  - VBoxManage modifyvm "Metasploitable" --nic1 intnet --intnet1 "lab-net"
+  - VBoxManage modifyvm "Kali" --nic1 intnet --intnet1 "lab-net"
+- Create host-only adapter (if host<>VM interaction required):
+  - sudo VBoxManage hostonlyif create
+  - (Bind VM NIC to `vboxnet0` via GUI or CLI)
+- Snapshot baseline:
+  - VBoxManage snapshot "Metasploitable" take "baseline" --description "pre-lab baseline"
+
+Safety tips:
+- Do not attach bridged adapters that expose the lab to corporate or public networks unless explicitly required and approved.
+- Revert VMs to baseline snapshots after each student session.
+
+If using Docker for ELK/Test services (lab host):
+- Example: start a lightweight ELK stack for lab logs
+  - docker-compose up -d
+  - (Provide students with the docker-compose file in the classroom repo; ensure network isolation)
+
+---
+
+## Baseline discovery & defensive commands (what every pro must master)
+These commands are for inventory, triage, and detection tuning in authorized labs/staging.
+
+Network & host reachability
+- ping (basic reachability)
+  - ping -c 4 10.0.0.10
+
+Port/service discovery (non-destructive; tune timing)
+- Full TCP SYN + service/version scan (lab only):
+  - nmap -sS -sV -p- -T3 --open -oA nmap_full 10.0.0.10
+- Focused web/service scan:
+  - nmap -sC -sV -p 80,443,8080 -T3 -oN nmap_web 10.0.0.10
+
+HTTP / TLS inspection
+- View response headers:
+  - curl -I -sS https://10.0.0.10
+- Fetch full response and headers:
+  - curl -sS -D headers.txt -o body.html https://10.0.0.10/path
+- Inspect TLS certificate:
+  - echo | openssl s_client -connect 10.0.0.10:443 2>/dev/null | openssl x509 -noout -text
+
+Directory / endpoint discovery (low-rate)
+- ffuf (directory discovery; throttle requests)
+  - ffuf -u http://10.0.0.10/FUZZ -w wordlist.txt -p 0.2 -t 10
+  - (Use conservative concurrency/rate flags; treat results as candidates to verify manually)
+
+Packet capture & analysis
+- Capture traffic to PCAP:
+  - sudo tcpdump -i eth0 host 10.0.0.10 -w lab_capture.pcap
+- Extract HTTP requests with tshark:
+  - tshark -r lab_capture.pcap -Y 'http.request' -T fields -e frame.time -e ip.src -e http.host -e http.request.uri
+
+Proxy-based inspection (Burp/ZAP)
+- Configure browser proxy to 127.0.0.1:8080 and install Burp CA cert for HTTPS inspection.
+- Use Repeater to replay safe, synthetic requests and to inspect flows. Do not use Burp to run destructive payloads in production.
+
+Log inspection
+- Tail web server logs:
+  - sudo tail -F /var/log/nginx/access.log /var/log/nginx/error.log
+- Filter logs by IP:
+  - awk '$1 == "10.0.0.5"' /var/log/nginx/access.log | tail
+
+Code & dependency scanning
+- Semgrep (SAST useful in class):
+  - pip install semgrep
+  - semgrep --config=p/ci ./src
+- Trivy (container scanning):
+  - trivy image --severity HIGH,CRITICAL your-image:latest
+
+---
+
+## Safe offensive / emulation commands & practices
+Emphasize attacker mindset while using only benign, demonstrative actions and synthetic markers.
+
+Safe marker POST (prove reachability & logging without exfiltration)
+- curl -sS -X POST 'http://10.0.0.10/api/echo' -H 'Content-Type: application/json' -d '{"marker":"CLASS-<student-id>-2026"}'
+- Rationale: demonstrates that input reaches server and is logged; use synthetic only.
+
+Token lifecycle checks (staging)
+- Use test account to request token (API-specific; example curl):
+  - curl -sS -X POST 'https://staging.example/api/auth' -H 'Content-Type:application/json' -d '{"user":"test","pass":"test"}'
+- Test expired token handling:
+  - curl -i -H "Authorization: Bearer <expired-token>" https://staging.example/api/user
+
+API schema inspection (OpenAPI)
+- Download OpenAPI spec and inspect:
+  - curl -sS https://staging.example/openapi.json | jq '.paths'
+
+Contract fuzzing (staging only)
+- Use contract-based fuzzer or limited mutation tool at low rate; e.g., use a fuzzer that respects OpenAPI, or a local script that mutates JSON fields and sleeps between requests.
+
+Important: Do NOT publish any exploit payloads. When demonstrating high-risk concepts, use instructor-run, isolated demos or videos and ensure no exploit strings are given to students.
+
+---
+
+## Detection & monitoring — IDS, SIEM, rules (commands & examples)
+Start Suricata (lab monitoring VM)
+- sudo suricata -c /etc/suricata/suricata.yaml -i eth0
+Tail fast log
+- tail -f /var/log/suricata/fast.log
+
+Example Suricata rule (lab use only — detection of high SYN rate)
+```
+alert tcp any any -> $HOME_NET any (msg:"LAB: possible SYN scan"; flags:S; detection_filter: track by_src, count 20, seconds 60; sid:1000001; rev:1;)
+```
+Explanation: alerts if a source sends 20 SYNs to hosts in HOME_NET within 60 seconds. Tune counts/intervals for lab size.
+
+SIEM / Kibana KQL examples (assumes logs ingested)
+- Excessive 401s from single IP (last 10 min):
+  - event.action : "authentication_failure" and source.ip : "10.0.0.5" and @timestamp >= now-10m
+- Admin endpoint accessed (last 1 hour):
+  - event.dataset:"nginx.access" and url.path : "/admin" and @timestamp >= now-1h
+
+Alerting idea: correlate application logs (auth failures), WAF logs, and network IDS alerts to reduce false positives.
+
+---
+
+## Secure SDLC & CI integration (commands and CI examples)
+Semgrep in CI (GitLab CI snippet)
+```
+stages:
+  - test
+
+semgrep_scan:
+  stage: test
+  image: python:3.10
+  script:
+    - pip install semgrep
+    - semgrep --config=p/ci ./src
+```
+
+Trivy container scan (CI step)
+- trivy image --severity HIGH,CRITICAL your-image:latest
+
+Dependency automation
+- GitHub Dependabot or Snyk integration (UI/CI-driven); teach students to triage SCA output for true positives vs. transitive noise.
+
+DAST in staging (policy)
+- Run DAST against staging only with limited rate and scope. Feed results into triage for manual verification.
+
+---
+
+## Lab exercises (authorized, non-destructive) — step-by-step (commands included)
+Each exercise uses isolated lab network and synthetic data.
+
+Exercise 1 — Reconnaissance & IDS tuning
+- Objective: observe how scanning appears to IDS and tune detection rules.
+- Steps:
+  1. Start monitoring VM with Suricata:
+     - sudo suricata -c /etc/suricata/suricata.yaml -i eth0
+  2. From attacker VM, run controlled nmap scan:
+     - nmap -sS -sV -p 22,80,443 -T3 --open -oN nmap_lab 10.0.0.10
+  3. On monitoring VM, correlate:
+     - tail -n 200 /var/log/suricata/fast.log
+  4. Tune rule thresholds and re-run scan to see differences.
+- Deliverables: nmap output, Suricata alert excerpts, short write-up on tuning.
+
+Exercise 2 — HTTP header hardening
+- Objective: identify missing security headers and implement fixes.
+- Steps:
+  1. Inspect headers:
+     - curl -I -sS https://10.0.0.10
+  2. In staging Nginx, add headers (example):
+     - add_header Strict-Transport-Security "max-age=31536000; includeSubDomains; preload" always;
+     - add_header X-Frame-Options "DENY" always;
+     - add_header Content-Security-Policy "default-src 'self';" always;
+  3. Reload Nginx and verify:
+     - sudo nginx -s reload
+     - curl -I -sS https://10.0.0.10
+- Deliverables: before/after header outputs, explanation of each header.
+
+Exercise 3 — Auth lifecycle & logging
+- Objective: validate token revocation, expiry handling, and logging.
+- Steps:
+  1. Obtain test token (adapt to app):
+     - curl -sS -X POST 'https://staging.example/api/auth' -H 'Content-Type: application/json' -d '{"user":"test","pass":"test"}'
+  2. Use expired token to access resource:
+     - curl -i -H "Authorization: Bearer <expired-token>" https://staging.example/api/user
+  3. Inspect application logs for rejection entry:
+     - sudo tail -n 200 /var/log/app/app.log | grep "<token-id or user>"
+- Deliverables: sanitized request/response, log snippet, remediation suggestions.
+
+Exercise 4 — IDOR detection with synthetic data
+- Objective: demonstrate ownership checks are enforced.
+- Steps:
+  1. Create resource as user A (staging):
+     - curl -sS -X POST 'https://staging.example/api/resources' -H 'Authorization: Bearer <token-A>' -d '{"name":"class-demo"}'
+  2. Attempt access with user B to same resource ID:
+     - curl -i -H "Authorization: Bearer <token-B>" https://staging.example/api/resources/<id>
+  3. Confirm response is 403/404 and log entry exists.
+- Deliverables: request/response, server logs, updated server-side ownership check PR (instructor-reviewed).
+
+Exercise 5 — Contract fuzzing (staging only)
+- Objective: find input handling issues without exploits.
+- Steps:
+  1. Obtain OpenAPI spec of staging API:
+     - curl -sS https://staging.example/openapi.json -o openapi.json
+  2. Use contract-based fuzzer (configured to low rate) to send mutated JSON bodies. (Tool choice taught in class; run with <=1 req/s)
+  3. Monitor application logs for 5xx errors or stack traces and report sanitized evidence.
+- Deliverables: fuzzer run summary, log excerpts, suggested fixes (input validation/canonicalization).
+
+---
+
+## Reporting & remediation (templates & commands)
+Every finding should include:
+- Title, affected asset (URL/IP), environment (lab/staging/prod), time.
+- Severity & justification.
+- Description & root cause.
+- Safe PoC: sanitized steps using synthetic markers (example: curl POST with marker).
+- Evidence: screenshots, sanitized request/response, log entries with timestamps.
+- Remediation: precise code/config changes, example commands (e.g., nginx config snippet, semgrep rule).
+- Detection: SIEM query or Suricata rule to detect similar attempts.
+
+Example safe PoC (curl marker)
+- curl -sS -X POST 'http://10.0.0.10/api/echo' -H 'Content-Type: application/json' -d '{"marker":"CLASS-001-A"}'
+
+Example remediation snippet (Nginx HSTS)
+- Add to server block:
+  ```
+  add_header Strict-Transport-Security "max-age=31536000; includeSubDomains; preload" always;
+  ```
+- Reload:
+  - sudo nginx -s reload
+
+---
+
+## Rules of Engagement (RoE) template (class use)
+- Engagement title: [Course Lab — Week X]
+- Purpose: Authorized teaching lab / emulation
+- Scope:
+  - In-scope: Internal `lab-net` addresses 10.0.0.10–10.0.0.50
+  - Out-of-scope: Corporate network, Internet-facing services, third-party integrations
+- Allowed techniques:
+  - Passive recon, controlled scanning (-T3 or lower), proxy inspection, contract fuzzing in staging, safe marker submissions
+- Disallowed techniques:
+  - DoS, data exfiltration of real user data, exploitation leading to persistent backdoors, WAF/IDS evasion instructions
+- Time window: [start-end]
+- Contacts: Instructor name/email/phone; emergency kill-switch: [contact]
+- Data handling: synthetic/test accounts only; artifacts retained for X days then deleted
+- Acceptance: rollback and snapshot restore after session
+
+Students must sign the RoE before access.
+
+---
+
+## Resources & references
+- OWASP Top 10 / API Security Top 10
+- MITRE ATT&CK (for mapping emulation to detection tests)
+- PortSwigger Web Security Academy (defensive labs)
+- Suricata documentation & rule writing guides
+- Semgrep rules registry (SAST examples)
+- Trivy, Snyk, Dependabot docs (SCA)
+
+---
+
+## Next deliverables I can prepare (pick one)
+- Printable RoE PDF and student signature sheet.
+- Full VBoxManage + Vagrantfile or Terraform/Ansible IaC to spin up an isolated lab (Metasploitable + Kali + Suricata + ELK), with clear isolation and no exploit automation.
+- Per-exercise student worksheets with exact safe commands and expected outputs.
+- Suricata rule pack and a small set of Kibana queries tuned for the lab topology.
+- A graded rubric + sample student submissions for instructors.
+
+Which would you like me to generate next? Include hypervisor preference (VirtualBox / VMware) and detection stack (Suricata+ELK, Snort+Splunk, or Filebeat+Elasticsearch+Kibana).
+
+
+
+
+insight........................................................insight
+
+
+
+Understood — below is an expanded, practical instructor-facing “insight” document that builds on the teaching note I gave you. It focuses on professional offensive (authorized/emulation) and defensive skills, and it contains many concrete, safe commands, config snippets, detection rules, and sample code you can use in isolated labs or staging environments. I DO NOT include exploit payloads, Metasploit exploit steps, or instructions to evade defenses. All interactive commands are intended for authorized labs only; make sure every student signs an RoE before hands‑on work.
+
+Contents
+
+    Safety / RoE reminder
+    Lab setup (VMs, isolation, snapshots) — commands
+    Discovery & reconnaissance (safe) — commands + explanation
+    HTTP / TLS inspection — commands + what to look for
+    Directory / endpoint discovery (safe) — commands and throttling
+    Proxy inspection & browser setup (Burp/ZAP) — notes
+    Packet capture & network analysis — tcpdump, tshark, Wireshark filters
+    Host & process triage commands — ps/ss/lsof/journalctl
+    IDS (Suricata) — start, rule examples, rules explained
+    SIEM / Kibana queries and detection examples
+    DAST / API testing (safe) — OWASP ZAP example
+    SAST / Semgrep examples (detect insecure patterns)
+    SCA / Container scanning (Trivy, Snyk) commands
+    Hardening snippets (Nginx headers, CSP, rate limiting, fail2ban)
+    API & Auth checks (JWT validation, token introspection templates, safe testing)
+    Secure DB access & parameterized query examples (Python/Node/Java)
+    Kubernetes checks & hardening commands
+    Forensics & evidence collection (safe commands)
+    How to use these artifacts in class (exercises & deliverables)
+    Offer: additional artifacts I can produce
+
+Safety / RoE (read BEFORE any lab)
+
+    Signed Rules of Engagement (RoE) required.
+    Use internal/host-only or an air‑gapped lab (lab-net). Never run these commands against production or third‑party networks without explicit written approval.
+    Use synthetic accounts & synthetic data. Never exfiltrate real user PII.
+    Keep snapshots and a kill-switch. Revert to baseline after exercises.
+
+    Lab setup — VirtualBox (CLI) & snapshots
+
+    Import OVA:
+        VBoxManage import Metasploitable2.ova
+    Set NIC to internal network "lab-net":
+        VBoxManage modifyvm "Metasploitable" --nic1 intnet --intnet1 "lab-net"
+        VBoxManage modifyvm "Kali" --nic1 intnet --intnet1 "lab-net"
+    Create host-only adapter (if host<>VM needed):
+        sudo VBoxManage hostonlyif create
+    Start a VM:
+        VBoxManage startvm "Kali" --type headless
+    Create snapshots:
+        VBoxManage snapshot "Metasploitable" take "baseline" --description "pre-lab baseline"
+    Revert snapshot:
+        VBoxManage snapshot "Metasploitable" restore "baseline"
+
+Why: snapshots let you quickly restore known good state after each student.
+
+    Discovery & reconnaissance — safe commands Purpose: inventory services, versions, and targets for detection/hardening. Use slow timing in shared labs.
+
+    Ping / host discovery:
+        ping -c 4 10.0.0.10
+    ARP table:
+        arp -a
+    Nmap (safe, tuned):
+        Quick top ports + version detection:
+            nmap -sV -p 22,80,443,3306 -T3 --open -oN nmap_quick 10.0.0.10
+        Full TCP SYN scan (lab only, conservative timing):
+            nmap -sS -sV -p- -T3 --open -oA nmap_full 10.0.0.10
+        Service script scan (non-invasive default scripts):
+            nmap -sC -sV -p 80,443 -T3 10.0.0.10
+    Mass DNS / subdomain discovery (passive where possible):
+        Use publicly available services (crt.sh, dnsdumpster) and only query allowed targets. For local lab: dnsenum for lab domains.
+
+Teaching notes:
+
+    Show students how scan timing (-T) and flags affect noise and IDS/IDS triggers.
+    Teach that scanner output is a starting point for manual verification, not a vulnerability list.
+
+    HTTP & TLS inspection
+
+    Show headers:
+        curl -I -sS https://10.0.0.10
+    Full request & response:
+        curl -sS -D headers.txt -o body.html https://10.0.0.10/path
+    Follow redirects:
+        curl -sS -L -D headers.txt -o body.html https://10.0.0.10
+    TLS certificate inspection:
+        echo | openssl s_client -connect 10.0.0.10:443 2>/dev/null | openssl x509 -noout -text
+    Check TLS ciphers (OpenSSL):
+        openssl s_client -connect 10.0.0.10:443 -cipher 'ECDHE' 2>/dev/null
+
+What to look for:
+
+    Presence / absence of HSTS, CSP, X-Frame-Options, X-Content-Type-Options, Referrer-Policy.
+    Session cookies missing Secure/HttpOnly/SameSite attributes.
+    TLS cert expiration, weak ciphers.
+
+    Directory / endpoint discovery — safe, rate-limited
+
+    ffuf (throttled):
+        ffuf -u http://10.0.0.10/FUZZ -w /path/wordlist.txt -t 10 -p 0.2
+        -p is a delay between requests (some builds); otherwise use -r rate control via wrapper
+    gobuster (dir scan) — throttle:
+        gobuster dir -u http://10.0.0.10 -w wordlist.txt -t 10
+    Note: Results are candidates — always verify manually with curl and browser. Avoid aggressive bruteforce in shared labs.
+
+    Proxy inspection & browser setup (Burp / ZAP)
+
+    Burp: start Burp, set browser proxy to 127.0.0.1:8080, install Burp CA cert to inspect HTTPS.
+    ZAP (headless in CI or GUI for manual):
+        Start ZAP in GUI or use docker:
+            docker run -u ( i d − u ) : (id -g) -p 8080:8080 owasp/zap2docker-stable zap.sh -daemon -port 8080 -host 0.0.0.0
+    Teaching: use proxy to observe cookies, auth headers, token flows and to practice safe replaying of benign requests.
+
+    Packet capture & network analysis
+
+    tcpdump capture single host traffic:
+        sudo tcpdump -i eth0 host 10.0.0.10 -w capture.pcap
+    Capture only HTTP traffic:
+        sudo tcpdump -i eth0 'tcp port 80 or tcp port 443' -w web_traffic.pcap
+    Read capture with tshark:
+        tshark -r capture.pcap -Y 'http.request' -T fields -e frame.time -e ip.src -e http.host -e http.request.uri
+    Extract HTTP bodies in tshark (advanced):
+        tshark -r capture.pcap -Y 'http' -T fields -e http.request.method -e http.request.uri -e http.file_data
+    Wireshark display filters (examples):
+        http.request && ip.addr == 10.0.0.10
+        tcp.flags.syn == 1 && tcp.flags.ack == 0
+
+Teaching notes:
+
+    Show how packet captures can be large. Teach students to filter aggressively and to avoid capturing sensitive payloads in production.
+
+    Host & process triage (safe forensic commands)
+
+    List listening sockets:
+        sudo ss -tunlp
+    List processes with ports:
+        sudo lsof -i -P -n
+    Show running processes sorted by CPU:
+        ps aux --sort=-%cpu | head -n 20
+    System logs (systemd):
+        sudo journalctl -u nginx -n 200 --no-pager
+    Web logs:
+        sudo tail -F /var/log/nginx/access.log
+    Auditd (find execs by user since a timestamp):
+        sudo ausearch -ua student -ts recent
+
+Teaching notes:
+
+    Emphasize preservation: copy logs to a secure location, avoid modifying original artifacts where forensics is required.
+
+    IDS — Suricata: start, basic rules, examples
+
+    Start Suricata on interface eth0:
+        sudo suricata -c /etc/suricata/suricata.yaml -i eth0
+    Tail fast.log:
+        tail -f /var/log/suricata/fast.log
+
+
+
+Example rules (lab-only, defensive)
+
+    Detect SYN scanning (lab threshold):
+
+{1}    alert tcp any any -> $HOME_NET any (msg:"LAB: SYN scan candidate"; flags:S; detection_filter: track by_src, count 20, seconds 60; sid:1000001; rev:1;)
+
+
+Detect many 401 responses from one IP (approximate via HTTP status):
+
+{2}       alert http any any -> $HOME_NET any (msg:"LAB: Many 401 responses from source"; flow:established,to_client; http.statcode; detection_filter: track by_src, count 10, seconds 300; sid:1000002; rev:1;)    
+
+
+Detect requests to admin endpoints
+
+{3}     alert http any any -> $HOME_NET any (msg:"LAB: Access to admin endpoint"; flow:to_server,established; http.uri; content:"/admin"; nocase; sid:1000003; rev:1;)
+
+
+Teaching notes:
+
+    Cover detection_filter vs threshold for performance.
+    Teach rule tuning to reduce false positives (adjust counts/seconds, scope by networks/IPs).
+
+    SIEM / Kibana queries & detection ideas
+
+    Detect spike in 5xx responses (KQL):
+        event.dataset : "nginx.access" and response : "5*" and @timestamp >= now-15m
+    Find repeated auth failures from one IP (KQL):
+        event.action : "authentication_failure" and @timestamp >= now-10m
+    Detect admin page access outside business hours:
+        event.dataset:"nginx.access" and url.path : "/admin" and @timestamp >= "now-1d/d" and @timestamp <= "now-1d/d+08h"
+
+Teaching notes:
+
+    Teach students to correlate IDS alerts, WAF logs, and application logs to reduce false positives and find attack chains.
+
+    DAST / API testing (safe) — OWASP ZAP example
+
+    Start ZAP in daemon mode and run baseline scan against staging (non-destructive):
+        docker run -u ( i d − u ) : (id -g) -p 8080:8080 owasp/zap2docker-stable zap.sh -daemon -port 8080 -host 0.0.0.0
+        python zap-baseline.py -t https://staging.local -r zap_report.html
+    Teaching notes:
+        Emphasize running DAST only against staging and throttling scans. Teach manual validation of findings.
+
+    SAST — Semgrep examples (finding insecure patterns)
+
+    Install & run:
+        pip install semgrep
+        semgrep --config=auto ./src
+    Example custom Semgrep rule to detect use of exec in Python:
+        Create a YAML rule:
+        Code
+
+        rules:
+          - id: python-exec-usage
+            patterns:
+              - pattern: exec($CODE)
+            message: "Use of exec() found; avoid dynamic code execution."
+            languages: [python]
+            severity: WARNING
+
+        Run:
+            semgrep --config path/to/rules.yml ./src
+
+Teaching notes:
+
+    Teach students to triage SAST output for false positives and to write rules targeting risky APIs.
+
+    SCA & container scanning (Trivy, Snyk)
+
+    Trivy scan:
+        trivy fs --severity HIGH,CRITICAL ./project
+        trivy image --severity HIGH,CRITICAL your-image:latest
+    Snyk (CLI after auth):
+        snyk test --all-projects
+
+    Hardening snippets — Nginx, CSP, rate limiting, fail2ban
+
+
+Nginx security headers (add to server block)
+
+{4}           add_header Strict-Transport-Security "max-age=31536000; includeSubDomains; preload" always;
+add_header X-Frame-Options "DENY" always;
+add_header X-Content-Type-Options "nosniff" always;
+add_header Referrer-Policy "no-referrer-when-downgrade" always;
+add_header Content-Security-Policy "default-src 'self'; script-src 'self' 'sha256-...'; object-src 'none';" always;  
+
+
+Rate limiting (Nginx example)
+
+{5}         # in http context
+limit_req_zone $binary_remote_addr zone=mylimit:10m rate=10r/m;
+
+# in server/location
+limit_req zone=mylimit burst=20 nodelay;
+
+fail2ban basic jail (protect SSH / web auth)
+
+Install & add jail.conf:
+
+    /etc/fail2ban/jail.d/sshd.conf
+
+{6}        [sshd]
+enabled = true
+port = ssh
+filter = sshd
+logpath = /var/log/auth.log
+maxretry = 5
+bantime = 3600
+
+
+    Start:
+        sudo systemctl enable --now fail2ban
+
+Teaching notes:
+
+    Rate-limits must be balanced to avoid blocking legitimate users; use per-account and per-IP buckets.
+
+    API & Auth checks — JWT validation & token introspection (templates)
+
+    Validate JWT header/claims locally (no secrets leaked):
+        jwt in base64: header.payload.signature — use jwt.io offline or jq to decode payload
+        Decode payload with base64 (lab-only, no secret reveal):
+            echo 'eyJhbGciOi...' | cut -d '.' -f2 | base64 -d | jq .
+
+Server-side JWT validation (Python example using PyJWT)
+
+{7}		import jwt
+from jwt import InvalidTokenError
+
+def validate_jwt(token, public_key, audience):
+    try:
+        payload = jwt.decode(token, public_key, algorithms=['RS256'], audience=audience)
+        return payload
+    except InvalidTokenError as e:
+        # Log, handle rejection
+        return None
+
+Token introspection (OAuth2) — template CURL (staging)
+
+{8}		curl -s -u "client_id:client_secret" -X POST https://auth.example.local/oauth2/introspect \
+  -d "token=<access_token>"
+
+
+Teaching notes:
+
+    Teach to validate signature, expiry, audience, issuer, and any scopes/claims server-side for each protected resource.
+
+    Secure DB access & example parameterized queries
+
+    Create limited DB user (Postgres example):
+        psql -U postgres
+        CREATE ROLE app_user WITH LOGIN PASSWORD 'replace-with-secure';
+        GRANT CONNECT ON DATABASE app_db TO app_user;
+        GRANT USAGE ON SCHEMA public TO app_user;
+        GRANT SELECT, INSERT, UPDATE ON ALL TABLES IN SCHEMA public TO app_user;
+
+Parameterized query examples — safe coding
+
+ Python (psycopg2)	
+
+{9}		import psycopg2
+
+conn = psycopg2.connect(dbname="app_db", user="app_user", password="...")
+with conn.cursor() as cur:
+    cur.execute("SELECT id, name FROM users WHERE email = %s", (email,))
+    result = cur.fetchone()
+
+Node.js (pg)  JavaScript
+
+{10}	const { Pool } = require('pg');
+const pool = new Pool({ /* config */ });
+
+const res = await pool.query('SELECT id, name FROM users WHERE email = $1', [email]);
+
+Java (PreparedStatement)
+
+{11}	PreparedStatement ps = conn.prepareStatement("SELECT id, name FROM users WHERE email = ?");
+ps.setString(1, email);
+ResultSet rs = ps.executeQuery();
+
+
+
+Teaching notes:
+
+    Emphasize principle of least privilege: app user should not have admin rights (no CREATE/DROP).
+
+    Kubernetes checks & hardening commands (high-level)
+
+    View namespaces, pods, roles:
+        kubectl get namespaces
+        kubectl get pods -A
+        kubectl get clusterrolebindings
+    Inspect RBAC rules for a service account:
+        kubectl auth can-i get pods --as=system:serviceaccount:my-ns:my-sa
+
+
+NetworkPolicy example (allow only same namespace):
+
+{12}	apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: deny-from-outside
+  namespace: my-ns
+spec:
+  podSelector: {}
+  policyTypes:
+  - Ingress
+  ingress:
+  - from:
+    - podSelector: {}
+
+
+Teaching notes:
+
+    Teach setting PodSecurityPolicy/PSA, image scanning, and RBAC least privilege.
+
+    Forensics & evidence collection (safe) Collect volatile and non-volatile artifacts in lab. Preserve originals; copy to artifact store.
+
+    Copy logs (example):
+        sudo cp /var/log/nginx/access.log /tmp/artifacts/nginx-access.log
+        sudo cp /var/log/nginx/error.log /tmp/artifacts/nginx-error.log
+    Network captures:
+        sudo tcpdump -i eth0 host 10.0.0.10 -w /tmp/artifacts/capture.pcap
+    Process & socket lists:
+        sudo ss -tunap > /tmp/artifacts/ss.txt
+        sudo lsof -i -P -n > /tmp/artifacts/lsof.txt
+    Systemd journal export:
+        sudo journalctl -u nginx --since "2026-01-01" --no-pager > /tmp/artifacts/journal_nginx.log
+
+Teaching notes:
+
+    Keep chain-of-custody metadata (who collected, when, from which snapshot), use checksums (sha256sum) for artifacts.
+
+    How to use these in class — exercises & deliverables Example student deliverables per exercise:
+
+    Lab worksheet with commands run, timestamps, sanitized evidence (curl outputs, Suricata alerts, PCAP snippets) and Remediation PR (e.g., Nginx header add).
+    Detection rule tuned and explanation (Suricata rule + Kibana query).
+    Final report: Title, Impact, Safe PoC (synthetic marker + commands), Evidence (logs, screenshots), Remediation, Retest steps.
+
+Example exercise flow:
+
+    Day 1: Recon & IDS tuning (nmap, Suricata rule creation)
+    Day 2: Web header hardening (curl, nginx edit, reload, verify)
+    Day 3: Auth lifecycle & logging (obtain token in staging, test expiry handling, show logs)
+    Day 4: API contract fuzzing in staging (openapi, fuzzer run, triage)
+    Day 5: Present final reports and remediation PRs.
+
+    Instructor aids I can produce for you I can generate any of the following (pick one or more):
+
+    Detailed per-exercise student worksheets with exact safe commands and expected outputs.
+    A Suricata rule pack (lab-tuned) plus a short rule-writing workshop.
+    Semgrep rule set for your codebase to find common insecure patterns (exec, eval, hard-coded credentials).
+    A ready-to-run VBoxManage + docker-compose repo to spin up isolated lab (Metasploitable + Kali + Suricata + ELK), with clear network isolation and snapshots. (No exploit automation.)
+    Printable RoE and student signature PDF.
+    Example graded rubric and sample student submissions.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
